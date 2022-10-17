@@ -13,6 +13,7 @@ Date: 14/11/2022
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <arpa/inet.h>
 
 
 
@@ -21,18 +22,21 @@ Date: 14/11/2022
 /*
     1. ✓ Extrahovat argumenty na cmd
     2. Poslat data serveru
-        - musime otevrit socket na -u
+        - musim otevrit socket na -u
             ✓ vytvorit socket
-            -- musime zjistit, co je -u, pokud neni zadane
-        - musime poslat soubor v packetu
+            ✓ musim zjistit -u, pokud neni zadane
+            ✓ jinak se prenese -u
+        - musim poslat soubor v packetu
             -- vytvorit packet
-            ✓ musime nacist soubor/STDIN
+                ✓ musim nacist soubor/STDIN
                 --- pokud je moc velky -- TCP/UDP
-            -- zakodovat content soubor/STDIN, aby obsahoval znaky, 
+                --- kontrolovat, jak velky soubor je
+            ✓ zakodovat content soubor/STDIN, aby obsahoval znaky, 
                ktere se muzou objevovat v domene (base64 ci podobne)
-               (po tecku po tecku je jenom 63 B a dohromady data 255 B)
+            -- tecka po tecku je jenom 63 B a dohromady data 255 B)
             -- poslat zakodovany soubor packetem  
     3. Ošetřit errory
+    4. Lépe rozdělený kód na podproblémy (=funkce)
 */
 
 // Examples of the input
@@ -45,6 +49,47 @@ Date: 14/11/2022
 // define macros
 #define MAXLINE 10000 
 
+// function for encoding
+// encode is done via: dec -> hex
+int encode(char *data, char *output) {
+    for (int i = 0; i < strlen(data); i++) {
+        sprintf(output+2*i, "%02x", data[i]);
+    }
+}
+
+// function for sending packets
+int sendingpackets(int socket, char *data, char *label, int labellength, char *u, struct sockaddr_in sockaddr) {
+    char *message = NULL;
+    message = calloc(1, MAXLINE);
+    // -1 is reserved for a '.' before label is written
+    int packetlength = 255 - labellength - 1;
+    int packetnum = strlen(data) / packetlength + 1;
+
+    int crntindex = 0;
+
+    for (int i = 0; i < packetnum; i++) {
+        // sending corresponding characters from data variable
+        int index = 0;
+        for (int j = index; j < packetlength; j++) {
+            if ((crntindex % 64) == 0 && crntindex != 0) {
+                message[index] = '.';
+                index++;
+                crntindex++;
+                continue;
+            }
+            else {
+                message[index] = data[crntindex];
+            }
+            index++;
+            crntindex++;
+        }
+        printf("%s\n", message);
+        memset(message, 0, MAXLINE);
+
+        // sendto(socket, data, 255, MSG_OOB, sockaddr.sin_addr.s_addr, 255);
+    }
+    free(message);
+}
 
 int main (int argc, char const *argv[]) {
     // definition of variables
@@ -83,6 +128,9 @@ int main (int argc, char const *argv[]) {
         return 1;
     }
 
+    // this legth is used to determine how many packets will be sent
+    int labellength = strlen(b);
+
     // if the input for source filepath is on stdin
     if (source == NULL) {
         data = malloc(MAXLINE);
@@ -93,12 +141,11 @@ int main (int argc, char const *argv[]) {
         }
         fread(data, 1, MAXLINE, stdin);
     }
-    // todo: nacist soubor a ulozit data v nem
     else {
         // open the file
         FILE *fptr;
         fptr = fopen(source,"rb");
-        data = malloc(MAXLINE);
+        data = calloc(1, MAXLINE);
 
         if (fptr == NULL) {
             // todo: better error handling
@@ -108,34 +155,36 @@ int main (int argc, char const *argv[]) {
         // save the data from file to "data" variable
         fread(data, 1, MAXLINE, fptr);
         if (data == NULL) {
-            printf("what");
+             // todo: better error handling
+            fprintf(stderr, "Error: No data was loaded.");
+            return 1;
         }
         fclose(fptr);
     }
-
 
     // determine -u
     if (u == NULL) {
         FILE *fptr;
         char *tmp = NULL;
-        tmp = malloc(MAXLINE);
         fptr = fopen("/etc/resolv.conf", "rb");
-        fgets(tmp, MAXLINE, fptr);
         if (fptr == NULL) {
-            fprintf(stderr, "Error: Reading IP address failed.");
+            fprintf(stderr, "Error: File not found; IP address not found.");
             return 1;
         }
 
-        // lolol, this part is fucked 
-        char *token = strtok(tmp, " ");
-        while( token != NULL ) {
-            printf(" %s\n", token );
-            token = strtok(NULL, " ");
+        char buffer[MAXLINE];
+        while (fgets(buffer, MAXLINE, fptr) != NULL) {
+            if(strstr(buffer, "nameserver") != NULL) {
+                strtok(buffer, " ");
+                u = strtok(NULL, " \n");
+                break;
+            }
         }
-
-        free(tmp);
         fclose(fptr);
     }
+
+    char outputdata[MAXLINE];
+    encode(data, outputdata);
 
     // socket creation 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -150,15 +199,16 @@ int main (int argc, char const *argv[]) {
         return -1;
     }    
 
+    // assingning port & IP address
     sockaddr.sin_family = AF_INET;
     sockaddr.sin_port = htons(53);
-    // k tomuto se vaze -u; inet_addr(-u) == toto je IP adresa
-    // pokud neni IP adresa, musi se zjistit ze systemu
-    sockaddr.sin_addr.s_addr = INADDR_ANY;
+    // address is value of -u argument (or is extracted from resolv.conf)
+    sockaddr.sin_addr.s_addr = inet_addr(u);
 
+    // sending packets
+    sendingpackets(sockfd, outputdata, b, labellength, u, sockaddr);
 
-
-
+    // freeing allocated data
     free(data);
     return 0;
 }
