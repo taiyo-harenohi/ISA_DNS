@@ -11,7 +11,6 @@ Date: 14/11/2022
 #include <stdlib.h>
 
 
-
 // DNS RECEIVER //
 
 // dns_receiver {BASE_HOST} {DST_FILEPATH}
