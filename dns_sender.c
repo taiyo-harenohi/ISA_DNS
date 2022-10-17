@@ -30,7 +30,7 @@ Date: 14/11/2022
             -- vytvorit packet
                 ✓ musim nacist soubor/STDIN
                 --- pokud je moc velky -- TCP/UDP
-                --- kontrolovat, jak velky soubor je
+                ✓ kontrolovat, jak velky soubor je
             ✓ zakodovat content soubor/STDIN, aby obsahoval znaky, 
                ktere se muzou objevovat v domene (base64 ci podobne)
             -- tecka po tecku je jenom 63 B a dohromady data 255 B)
@@ -68,6 +68,10 @@ int sendingpackets(int socket, char *data, char *label, int labellength, char *u
     int crntindex = 0;
 
     for (int i = 0; i < packetnum; i++) {
+        // dns header
+
+
+
         // sending corresponding characters from data variable
         int index = 0;
         for (int j = index; j < packetlength; j++) {
@@ -83,11 +87,24 @@ int sendingpackets(int socket, char *data, char *label, int labellength, char *u
             index++;
             crntindex++;
         }
-        printf("%s\n", message);
-        memset(message, 0, MAXLINE);
+
+        // the reserved index for '.'
+        message[index] = '.';
+        index++;
+        // put label into the message
+        for (int j = 0; j < labellength; j++) {
+            message[index] = label[j];
+            index++;
+        }
+
+        // dns tail
+
+
 
         // sendto(socket, data, 255, MSG_OOB, sockaddr.sin_addr.s_addr, 255);
+        memset(message, 0, MAXLINE);
     }
+    printf("%s\n", message);
     free(message);
 }
 
