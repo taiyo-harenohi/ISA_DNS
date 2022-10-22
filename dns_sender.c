@@ -15,26 +15,22 @@ Date: 14/11/2022
 #include <unistd.h>
 #include <arpa/inet.h>
 
-
-
-// DNS SENDER //
-
 /*
     1. ✓ Extrahovat argumenty na cmd
-    2. Poslat data serveru
-        - musim otevrit socket na -u
+    2. ✓ Poslat data serveru
+        ✓ musim otevrit socket na -u
             ✓ vytvorit socket
             ✓ musim zjistit -u, pokud neni zadane
             ✓ jinak se prenese -u
-        - musim poslat soubor v packetu
-            -- vytvorit packet
+        ✓ musim poslat soubor v packetu
+            ✓ vytvorit packet
                 ✓ musim nacist soubor/STDIN
-                --- pokud je moc velky -- TCP/UDP
+                ✓ pokud je moc velky -- UDP
                 ✓ kontrolovat, jak velky soubor je
             ✓ zakodovat content soubor/STDIN, aby obsahoval znaky, 
                ktere se muzou objevovat v domene (base64 ci podobne)
-            -- tecka po tecku je jenom 63 B a dohromady data 255 B)
-            -- poslat zakodovany soubor packetem  
+            ✓ tecka po tecku je jenom 63 B a dohromady data 255 B)
+            ✓ poslat zakodovany soubor packetem  
     3. Ošetřit errory
     4. Lépe rozdělený kód na podproblémy (=funkce)
 */
@@ -57,66 +53,96 @@ int encode(char *data, char *output) {
     }
 }
 
+// count the length of each stream of data
+char countlength(char *data) {
+    for (int i = 1; i <= 63; i++) {
+        if (data[i] == '\0') {
+            return i;
+        }
+    }
+    return 63;
+}
+
+int stripdomain(char *domain, char *message, int index) {
+    const char delim[2] = ".";
+    char *data;
+    char *buffer = malloc(strlen(domain) + 1);
+    strcpy(buffer, domain);
+    data = strtok(buffer, delim);
+    while (data != NULL) {
+        message[index] = countlength(data);
+        index++;
+        for (int j = 0; j < strlen(data); j++) {
+            message[index] = data[j];
+            index++;
+        }
+
+        data = strtok(NULL, delim);
+    }
+}
+
 // function for sending packets
-int sendingpackets(int socket, char *data, char *label, int labellength, char *u, struct sockaddr_in sockaddr) {
+int sendingpackets(int socket, char *data, char *domain, int domainlength, struct sockaddr_in sockaddr) {
     char *message = NULL;
     message = calloc(1, MAXLINE);
-    // -1 is reserved for a '.' before label is written
-    int packetlength = 255 - labellength - 1;
+    // 2 places are reserved for a length before first data stream 
+    // and before domain is written
+    int packetlength = 255 - domainlength - 2;
     int packetnum = strlen(data) / packetlength + 1;
 
     int crntindex = 0;
 
     for (int i = 0; i < packetnum; i++) {
         // dns header
+        char buffer[MAXLINE];
+        memcpy(buffer, "\n\t\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00", 12);
 
-
-
-        // sending corresponding characters from data variable
         int index = 0;
         for (int j = index; j < packetlength; j++) {
-            if ((crntindex % 64) == 0 && crntindex != 0) {
-                message[index] = '.';
-                index++;
+            if ((crntindex % 63) == 0) {
+                printf("%d\n", crntindex);
+                message[index++] = countlength(data);
+                printf("%s\n", data);
                 crntindex++;
                 continue;
             }
+            else if (data[crntindex - 1] == '\0') {
+                break;
+            }
             else {
-                message[index] = data[crntindex];
+                message[index] = data[crntindex - 1];
             }
             index++;
             crntindex++;
         }
 
+        printf("%s\n", message);
+
         // the reserved index for '.'
-        message[index] = '.';
+        message[index] = countlength(domain);
         index++;
-        // put label into the message
-        for (int j = 0; j < labellength; j++) {
-            message[index] = label[j];
-            index++;
-        }
+        stripdomain(domain, message, index);
+
+        strcpy(buffer+12, message);
 
         // dns tail
-
-
-
-        // sendto(socket, data, 255, MSG_OOB, sockaddr.sin_addr.s_addr, 255);
-        memset(message, 0, MAXLINE);
+        memcpy(buffer+12+strlen(message)+1, "\x00\x01\x00\x01", 4);
+        // sending packet
+        sendto(socket, buffer, 12+strlen(message)+1+4, 0, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+        memset(message, 0, strlen(message));
     }
-    printf("%s\n", message);
     free(message);
 }
 
-int main (int argc, char const *argv[]) {
+int main (int argc, char *argv[]) {
     // definition of variables
     char *b = NULL;
     char *u = NULL;
     char *dst = NULL;
     char *source = NULL;
     char *data = NULL;
-    int opt = 1;
     struct sockaddr_in sockaddr; // socket address
+    bool isFile = false;
 
     // argument handling
     for (int i = 1; i < argc; i++) {
@@ -132,28 +158,29 @@ int main (int argc, char const *argv[]) {
         }
         else {
             source = argv[i];
+            isFile = true;
         }
     }
 
     // todo: better error handling (more codes or smth)
     if (b == NULL) {
-        fprintf(stderr, "Error: BASE_HOST must be defined.");
+        fprintf(stderr, "Error: BASE_HOST must be defined.\n");
         return 1;   
     }
     if (dst == NULL) {
-        fprintf(stderr, "Error: DST_FILEPATH must be defined.");
+        fprintf(stderr, "Error: DST_FILEPATH must be defined.\n");
         return 1;
     }
 
     // this legth is used to determine how many packets will be sent
-    int labellength = strlen(b);
+    int domainlength = strlen(b);
 
     // if the input for source filepath is on stdin
     if (source == NULL) {
         data = malloc(MAXLINE);
         if (data == NULL) {
             // todo: better error handling
-            fprintf(stderr, "Error: Not enough memory.");
+            fprintf(stderr, "Error: Not enough memory.\n");
             return 1;
         }
         fread(data, 1, MAXLINE, stdin);
@@ -166,14 +193,14 @@ int main (int argc, char const *argv[]) {
 
         if (fptr == NULL) {
             // todo: better error handling
-            fprintf(stderr, "Error: File doesn't exist.");
+            fprintf(stderr, "Error: File doesn't exist.\n");
             return 1;
         }
         // save the data from file to "data" variable
         fread(data, 1, MAXLINE, fptr);
         if (data == NULL) {
              // todo: better error handling
-            fprintf(stderr, "Error: No data was loaded.");
+            fprintf(stderr, "Error: No data was loaded.\n");
             return 1;
         }
         fclose(fptr);
@@ -185,7 +212,7 @@ int main (int argc, char const *argv[]) {
         char *tmp = NULL;
         fptr = fopen("/etc/resolv.conf", "rb");
         if (fptr == NULL) {
-            fprintf(stderr, "Error: File not found; IP address not found.");
+            fprintf(stderr, "Error: File not found; IP address not found.\n");
             return 1;
         }
 
@@ -204,26 +231,28 @@ int main (int argc, char const *argv[]) {
     encode(data, outputdata);
 
     // socket creation 
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) 
     {
         fprintf(stderr, "ERROR: Socket couldn't be created.\n");
         return -1;
-    }
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)))
-    {
-        fprintf(stderr, "ERROR: Couldn't set sockopt.\n");
-        return -1;
-    }    
+    }  
 
     // assingning port & IP address
     sockaddr.sin_family = AF_INET;
-    sockaddr.sin_port = htons(53);
+    // TODO: port 53
+    sockaddr.sin_port = htons(1234);
     // address is value of -u argument (or is extracted from resolv.conf)
     sockaddr.sin_addr.s_addr = inet_addr(u);
 
+    if (isFile) {
+        char nameencode[MAXLINE];
+        encode(source, nameencode);
+        // sending filename
+        sendingpackets(sockfd, nameencode, b, domainlength, sockaddr);
+    }
     // sending packets
-    sendingpackets(sockfd, outputdata, b, labellength, u, sockaddr);
+    sendingpackets(sockfd, outputdata, b, domainlength, sockaddr);
 
     // freeing allocated data
     free(data);
