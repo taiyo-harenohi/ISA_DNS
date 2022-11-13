@@ -1,11 +1,9 @@
-#příklad spuštění a seznam odevzdaných souborů,
-
 # DNS tunneling
-Autor: Nikola Machalkova 
+_Autor_: Nikola Machalkova 
 
-Login: xmacha80
+_Login_: xmacha80
 
-Date: 14/11/2022
+_Date_: 14/11/2022
 
 
 ## Content
