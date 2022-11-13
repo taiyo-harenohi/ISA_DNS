@@ -1,14 +1,12 @@
 # DNS tunneling
-_Autor_: Nikola Machalkova 
-
-_Login_: xmacha80
-
-_Date_: 14/11/2022
+**Autor**: Nikola Machalkova  
+**Login**: xmacha80  
+**Date**: 14/11/2022
 
 
 ## Content
 Program for managing DNS tunelling, includes sender and receiver. 
-Works _only_ for IPv4 and text files, as it doesn't support '\0'(null byte) in its messages.
+Works _only_ for IPv4 and text files, as it doesn't support '\0' (null byte) in its messages.
 
 
 ## Usage
