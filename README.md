@@ -37,11 +37,12 @@ to create binary files. Then run these files with the following arguments:
 
 ## List of files
 - sender
--- dns_sender.c
--- dns_sender_events.c
--- dns_sender_events.h
-- dns_receiver.c
--- dns_receiver_events.c
--- dns_receiver_events.h
+    * dns_sender.c
+    * dns_sender_events.c
+    * dns_sender_events.h
+- receiver
+    * dns_receiver.c
+    * dns_receiver_events.c
+    * dns_receiver_events.h
 - README
 - Makefile 
