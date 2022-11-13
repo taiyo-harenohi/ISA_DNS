@@ -44,3 +44,4 @@ to create binary files. Then run these files with the following arguments:
     * dns_receiver_events.h
 - README
 - Makefile 
+- manual.pdf
