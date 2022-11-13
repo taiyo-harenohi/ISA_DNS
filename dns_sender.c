@@ -14,26 +14,7 @@ Date: 14/11/2022
 #include <sys/socket.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-
-/*
-    1. ✓ Extrahovat argumenty na cmd
-    2. ✓ Poslat data serveru
-        ✓ musim otevrit socket na -u
-            ✓ vytvorit socket
-            ✓ musim zjistit -u, pokud neni zadane
-            ✓ jinak se prenese -u
-        ✓ musim poslat soubor v packetu
-            ✓ vytvorit packet
-                ✓ musim nacist soubor/STDIN
-                ✓ pokud je moc velky -- UDP
-                ✓ kontrolovat, jak velky soubor je
-            ✓ zakodovat content soubor/STDIN, aby obsahoval znaky, 
-               ktere se muzou objevovat v domene (base64 ci podobne)
-            ✓ tecka po tecku je jenom 63 B a dohromady data 255 B)
-            ✓ poslat zakodovany soubor packetem  
-    3. Ošetřit errory
-    4. Lépe rozdělený kód na podproblémy (=funkce)
-*/
+#include "dns_sender_events.h"
 
 // Examples of the input
 // $ dns_sender -u 127.0.0.1 example.com data.txt ./data.txt
@@ -43,95 +24,150 @@ Date: 14/11/2022
 // dns_sender [-u UPSTREAM_DNS_IP] {BASE_HOST} {DST_FILEPATH} [SRC_FILEPATH]
 
 // define macros
-#define MAXLINE 10000 
+#define MAXLINE 1000000 
+
+char* filename;
+int chunksize = 0;
 
 // function for encoding
 // encode is done via: dec -> hex
-int encode(char *data, char *output) {
-    for (int i = 0; i < strlen(data); i++) {
+int encode(char *data, char *output, int filesize) {
+    for (int i = 0; i < filesize; i++) {
         sprintf(output+2*i, "%02x", data[i]);
     }
 }
 
-// count the length of each stream of data
-char countlength(char *data) {
-    for (int i = 1; i <= 63; i++) {
-        if (data[i] == '\0') {
-            return i;
-        }
-    }
-    return 63;
-}
-
+// function for dealing with domain
 int stripdomain(char *domain, char *message, int index) {
     const char delim[2] = ".";
     char *data;
     char *buffer = malloc(strlen(domain) + 1);
     strcpy(buffer, domain);
     data = strtok(buffer, delim);
-    while (data != NULL) {
-        message[index] = countlength(data);
-        index++;
-        for (int j = 0; j < strlen(data); j++) {
-            message[index] = data[j];
-            index++;
-        }
 
+    index++;
+    while (data != NULL) {
+        message[index] = (char)strlen(data);
+        index++;
+        strcpy(message+index, data);
+        index += strlen(data);
         data = strtok(NULL, delim);
     }
+    free(buffer);
+}
+
+// function for dns_sender__on_chunk_encoded
+void chunkencoded(char* domain, int chunkID, char* data){
+    strcat(data, domain);
+    dns_sender__on_chunk_encoded(filename, chunkID, data);
+}
+
+// function for transfering data into message at the size of packetLength
+int getdata(char* data, char* message, int allsize, int nchunks, int packetlength, char* domain, int chunkID, bool isName) {
+    char buffer[MAXLINE];
+    memset(buffer, 0, MAXLINE);
+    for (int j = 0; j < nchunks; j++) {
+        char ar[63];
+        memset(ar, 0, 63);
+        int length = strlen(data+63*j);
+        if (length > 63) {
+            length = 63;
+        }
+        memcpy(ar, data+63*j, length);
+        if (strlen(ar) == 0) {
+            break;
+        }
+        
+        memcpy(buffer+(64*j), data+63*j, length);
+        buffer[64*j + length] = '.';
+
+        allsize += length;
+        chunksize += length;
+
+        message[64*j] = (char)length;
+        memcpy(message+(64*j + 1), data+(63*j), sizeof(ar));
+    }
+    int thissize = nchunks * 63;
+    if (thissize < packetlength && strlen(data) > thissize) {
+        int arraylength = packetlength - thissize;
+        if (strlen(data) < packetlength) {
+            arraylength = strlen(data) - thissize;
+        }
+        char ar[arraylength];
+        memcpy(ar, data+63*(nchunks), sizeof(ar));
+
+        memcpy(buffer+64*nchunks, data+63*nchunks, sizeof(ar));
+        buffer[64*nchunks + sizeof(ar)] = '.';
+
+        allsize += sizeof(ar);
+        chunksize += sizeof(ar);
+
+        message[64*(nchunks)] = (char)sizeof(ar);
+        memcpy(message+(64*nchunks + 1), data+(63*nchunks), sizeof(ar));
+    }    
+    if (!isName){
+        chunkencoded(domain, chunkID, buffer);
+    }
+    message[strlen(message)] = '\0';
+    return allsize;
 }
 
 // function for sending packets
-int sendingpackets(int socket, char *data, char *domain, int domainlength, struct sockaddr_in sockaddr) {
-    char *message = NULL;
-    message = calloc(1, MAXLINE);
-    // 2 places are reserved for a length before first data stream 
-    // and before domain is written
-    int packetlength = 255 - domainlength - 2;
+int sendingpackets(int socket, char *data, char *domain, struct sockaddr_in sockaddr, bool isName) {
+    // one char is reserved for the length of the first part of domain
+    // and for '\0'
+    int packetlength = 255 - strlen(domain) - 2 - 4;
+    int nchunks = packetlength / 63;
     int packetnum = strlen(data) / packetlength + 1;
+    int allsize = 0;
+    char message[MAXLINE];
+    memset(message, 0, MAXLINE);
+    int chunkID = 0;
 
-    int crntindex = 0;
+
+    if (packetlength % 2 == 1) {
+        packetlength -= 1;
+    }
 
     for (int i = 0; i < packetnum; i++) {
+        if (i % 100 == 99) {
+            sleep(1);
+        }
         // dns header
         char buffer[MAXLINE];
-        memcpy(buffer, "\n\t\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00", 12);
-
-        int index = 0;
-        for (int j = index; j < packetlength; j++) {
-            if ((crntindex % 63) == 0) {
-                printf("%d\n", crntindex);
-                message[index++] = countlength(data);
-                printf("%s\n", data);
-                crntindex++;
-                continue;
-            }
-            else if (data[crntindex - 1] == '\0') {
-                break;
-            }
-            else {
-                message[index] = data[crntindex - 1];
-            }
-            index++;
-            crntindex++;
+        // begin t
+        if (isName) {
+            memcpy(buffer, "\t\n\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00", 12);
+        }
+        // end n
+        else if (i == packetnum - 1) {
+            memcpy(buffer, "\n\n\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00", 12);
+            chunkID++;
+        }
+        // middle r
+        else{
+            memcpy(buffer, "\r\n\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00", 12);
+            chunkID++;
         }
 
-        printf("%s\n", message);
+        allsize = getdata(data+allsize, message, allsize, nchunks, packetlength, domain, chunkID, isName);
 
-        // the reserved index for '.'
-        message[index] = countlength(domain);
-        index++;
-        stripdomain(domain, message, index);
+        stripdomain(domain, message, strlen(message) - 1);
 
         strcpy(buffer+12, message);
-
         // dns tail
         memcpy(buffer+12+strlen(message)+1, "\x00\x01\x00\x01", 4);
         // sending packet
         sendto(socket, buffer, 12+strlen(message)+1+4, 0, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+        
+        if (!isName)
+        {
+            dns_sender__on_chunk_sent(&sockaddr.sin_addr, filename, chunkID, chunksize);
+        }
+        chunksize = 0;
+
         memset(message, 0, strlen(message));
     }
-    free(message);
 }
 
 int main (int argc, char *argv[]) {
@@ -142,7 +178,7 @@ int main (int argc, char *argv[]) {
     char *source = NULL;
     char *data = NULL;
     struct sockaddr_in sockaddr; // socket address
-    bool isFile = false;
+    bool isName = false;
 
     // argument handling
     for (int i = 1; i < argc; i++) {
@@ -158,11 +194,9 @@ int main (int argc, char *argv[]) {
         }
         else {
             source = argv[i];
-            isFile = true;
         }
     }
 
-    // todo: better error handling (more codes or smth)
     if (b == NULL) {
         fprintf(stderr, "Error: BASE_HOST must be defined.\n");
         return 1;   
@@ -172,18 +206,17 @@ int main (int argc, char *argv[]) {
         return 1;
     }
 
-    // this legth is used to determine how many packets will be sent
-    int domainlength = strlen(b);
+    filename = dst;
 
+    int filesize = 0;
     // if the input for source filepath is on stdin
     if (source == NULL) {
         data = malloc(MAXLINE);
         if (data == NULL) {
-            // todo: better error handling
             fprintf(stderr, "Error: Not enough memory.\n");
             return 1;
         }
-        fread(data, 1, MAXLINE, stdin);
+        filesize = fread(data, 1, MAXLINE, stdin);
     }
     else {
         // open the file
@@ -192,14 +225,12 @@ int main (int argc, char *argv[]) {
         data = calloc(1, MAXLINE);
 
         if (fptr == NULL) {
-            // todo: better error handling
             fprintf(stderr, "Error: File doesn't exist.\n");
             return 1;
         }
         // save the data from file to "data" variable
-        fread(data, 1, MAXLINE, fptr);
+        filesize = fread(data, 1, MAXLINE, fptr);
         if (data == NULL) {
-             // todo: better error handling
             fprintf(stderr, "Error: No data was loaded.\n");
             return 1;
         }
@@ -227,9 +258,6 @@ int main (int argc, char *argv[]) {
         fclose(fptr);
     }
 
-    char outputdata[MAXLINE];
-    encode(data, outputdata);
-
     // socket creation 
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) 
@@ -240,19 +268,27 @@ int main (int argc, char *argv[]) {
 
     // assingning port & IP address
     sockaddr.sin_family = AF_INET;
-    // TODO: port 53
-    sockaddr.sin_port = htons(1234);
+    sockaddr.sin_port = htons(53);
     // address is value of -u argument (or is extracted from resolv.conf)
     sockaddr.sin_addr.s_addr = inet_addr(u);
 
-    if (isFile) {
-        char nameencode[MAXLINE];
-        encode(source, nameencode);
-        // sending filename
-        sendingpackets(sockfd, nameencode, b, domainlength, sockaddr);
-    }
+    dns_sender__on_transfer_init(&sockaddr.sin_addr);
+
+    char outputdata[MAXLINE];
+    encode(data, outputdata, filesize);
+
+    // encode filename
+    char outputname[MAXLINE];
+    memset(outputname, 0, MAXLINE);
+    encode(dst, outputname, strlen(dst));
+
+    // sending filename
+    sendingpackets(sockfd, outputname, b, sockaddr, true);
+
     // sending packets
-    sendingpackets(sockfd, outputdata, b, domainlength, sockaddr);
+    sendingpackets(sockfd, outputdata, b, sockaddr, false);
+
+    dns_sender__on_transfer_completed(dst, filesize);
 
     // freeing allocated data
     free(data);
