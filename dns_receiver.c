@@ -14,35 +14,109 @@ Date: 14/11/2022
 #include <sys/socket.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-
+#include <stdbool.h>
+#include  "dns_receiver_events.h"
 
 // DNS RECEIVER //
 
 // dns_receiver {BASE_HOST} {DST_FILEPATH}
 // $ dns_receiver example.com ./data
 
-/*
-    1. ✓ Extrahuje argumenty
-    2. ✓ Otevrit server/socket
-    3. Prijme packety (ve smycce)
-        - kazdy packet musi rozsifrovat
-        - ziskat jmeno souboru a data
-        - ulozit data do DST_FILEPATH/jmenosouboru
-*/
-
 // define macros
-#define MAXLINE 512
+#define MAXLINE 1000000
+
+char domain[MAXLINE];
+int domainlen = 0;
+
+char query[MAXLINE];
+int chunksize = 0;
+int chunkID = 1;
+
+char* uselessquery(char *b) {
+    int len = query[0];
+    int ind = 0;
+    static char new[MAXLINE];
+    memset(new, 0, MAXLINE);
+    for (int i = 1; i <= len; i++) {
+        if (i == len) {
+            new[ind] = query[i];
+            ind++;
+            i++;
+            new[ind] = '.';
+            ind++;
+            len += query[i] + 1;
+        }
+        else {
+            new[ind] = query[i];
+            ind++;
+        }
+    }
+    strcat(new, b);
+
+    return new;
+}
 
 int decode(char *data, char *output) {
     for (int i = 0; i < strlen(data); i++) {
-        char hex[2];
+        char hex[3];
         hex[0] = data[i];
         hex[1] = data[i+1];
+        hex[2] = '\0';
         int number = (int)strtol(hex, NULL, 16);
-        printf("hex: %s --- dec: %c\n", hex, number);
+        output[i/2] = number;
         i++;
     }
 }
+
+int domainextract() {
+    char temp[MAXLINE];
+    memset(temp, 0, MAXLINE);
+    int index = 0;
+    for (int i = 0; i < strlen(domain); i++) {
+        if (domain[i] == '.') {
+            continue;
+        }
+        temp[index] = domain[i];
+        index++;
+    }
+    memset(domain, 0, MAXLINE);
+    memcpy(domain, temp, strlen(temp));
+    domainlen = strlen(domain);
+}
+
+int extractdata(char *data, char *temp, int len) {
+    int ind = 0;
+    for (int i = 1; i <= len ; i++) {
+        if (i == len) {
+            temp[ind] = data[i];
+            ind++;
+            i++;
+            len += data[i] + 1;
+        }
+        else {
+            temp[ind] = data[i];
+            ind++;
+        }
+    }
+
+    if (strstr(temp, domain) != NULL) {
+        char input[strlen(temp) - domainlen + 1];
+        memset(input, 0, sizeof(input));
+        memcpy(input, temp, (strlen(temp) - domainlen));
+
+        char output[(strlen(input) / 2) + 1];
+        memset(output, 0, sizeof(output));
+        decode(input, output);
+        memset(input, 0, strlen(temp) - domainlen);
+
+        memset(temp, 0, strlen(temp));
+        memcpy(temp, output, strlen(output));
+        return 0;
+    }
+    return 1;
+}
+
+
 
 
 int main (int argc, char *argv[]) {
@@ -60,7 +134,6 @@ int main (int argc, char *argv[]) {
         }
     }
     
-    // todo: better error handling (more codes or smth)
     if (b == NULL) {
         fprintf(stderr, "Error: BASE_HOST must be defined.\n");
         return 1;   
@@ -70,24 +143,23 @@ int main (int argc, char *argv[]) {
         return 1;
     }
 
+    memcpy(domain, b, strlen(b));
+    domainextract();
+
     // socket creation 
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) 
-    {
+    if (sockfd < 0)  {
         fprintf(stderr, "ERROR: Socket couldn't be created.\n");
         return -1;
     }
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt)))
-    {
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
         fprintf(stderr, "ERROR: Couldn't set sockopt.\n");
         return -1;
     }    
 
     // assingning port & IP address
     sockaddr.sin_family = AF_INET;
-    //TODO: port 53
-    sockaddr.sin_port = htons(1234);
-    // address is value of -u argument (or is extracted from resolv.conf)
+    sockaddr.sin_port = htons(53);
     sockaddr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(sockfd, (struct sockaddr *)&sockaddr, sizeof(sockaddr)) < 0) {
@@ -95,44 +167,119 @@ int main (int argc, char *argv[]) {
         return -1;
     }
 
-    char buffer[MAXLINE];
-
     socklen_t socklen = sizeof(sockaddr);
-    struct sockaddr clientaddr;
+    struct sockaddr_in clientaddr;
 
-    while (true)
-    {
-        int length = recvfrom(sockfd, buffer, MAXLINE, 0, &clientaddr, &socklen);
 
+    bool isFilename = false;
+    bool isEnd = false;
+
+    char buffer[MAXLINE];
+    memset(buffer, 0, MAXLINE);
+    int indbuffer = 0;
+
+    char filename[MAXLINE];
+    memset(filename, 0, MAXLINE);
+
+    char filedata[MAXLINE];
+    memset(filedata, 0, MAXLINE);
+
+    char filepath[MAXLINE];
+    memset(filepath, 0, MAXLINE);
+
+    memset(query, 0, MAXLINE);
+
+    while (true) {
         char data[MAXLINE];
+        memset(data, 0, MAXLINE);
+
+        char temp[MAXLINE];
+        memset(temp, 0, MAXLINE);
+
+        char output[MAXLINE];
+        memset(output, 0, MAXLINE);
+
+        // determine based on the first byte which type of packet was sent
+        int length = recvfrom(sockfd, buffer, MAXLINE, 0, (struct sockaddr*)&clientaddr, &socklen);
+        if (buffer[0] == '\t') {
+            isFilename = true;
+        }
+        else if (buffer[0] == '\n') {
+            isEnd = true;
+        }
+
         memcpy(data, buffer+12, length - 12);
         int len = (int)data[0];
-        printf("%d\n", len);
 
-
-
-
-        for (int i = 1; i < strlen(data) - 5; i++) {
-            char datain[63];
-            // kolik je zrovna delka
-            // pro tuto delku vytvorit char*
-            // vytahnout, kde zacina domena
-            // tu dekodovat
-            // ulozit do velkeho bufferu/primo souboru uz
-            for (int j = 0; j < len; j++) {
-                datain[j] = data[i];
-                i++;
+        if (isFilename) {
+            if (extractdata(data, temp, len)) {
+                memset(temp, 0, len);
+                isFilename = false;
+                continue;
             }
-            char output[MAXLINE];
-            
-            //decode(datain, output);
-            printf("%c\n", data[i]);
-            len = data[i];
-            char c = data[i];
-            printf("\ndata: %d\n", c);
-            //printf("\nlength: %d\n", len);
 
-            memset(datain, 0, strlen(datain));
+            dns_receiver__on_transfer_init(&clientaddr.sin_addr);
+
+            memcpy(filename, temp, strlen(temp) + 1);
+            isFilename = false;
+            memset(temp, 0, MAXLINE);
+
+            memset(filepath, 0, MAXLINE);
+            strcpy(filepath, dst);
+            strcat(filepath,"/");
+            strcat(filepath, filename);
+        }
+        else if (isEnd) {
+            memcpy(query, data, strlen(data) - strlen(b) - 1);
+
+            if (extractdata(data, temp, len)) {
+                memset(temp, 0, len);
+                isEnd = false;
+                continue;
+            }
+            dns_receiver__on_chunk_received(&clientaddr.sin_addr, filepath, chunkID, strlen(query) - (strlen(query) / 63 + 1) );
+            dns_receiver__on_query_parsed(filepath, uselessquery(b));
+            
+            memcpy(filedata+indbuffer, temp, strlen(temp));
+            indbuffer = 0;
+            
+            FILE *fptr;
+            fptr = fopen(filepath, "w");
+            if (fptr == NULL) {
+                fprintf(stderr, "ERROR: Couldn't create new file.\n");
+                return -1;
+            }
+
+            fwrite(filedata, 1, strlen(filedata), fptr);
+            fclose(fptr);
+            dns_receiver__on_transfer_completed(filepath, strlen(filedata));
+
+            memset(filename, 0, MAXLINE);
+            memset(filepath, 0, strlen(filepath));
+            memset(buffer, 0, strlen(buffer));
+            memset(filedata, 0, strlen(filedata));
+
+            memset(query, 0, strlen(query));
+            isEnd = false;
+            chunkID = 1;
+            chunksize = 0;
+        }
+        else {      
+            memcpy(query, data, strlen(data) - strlen(b) - 1);
+
+            if (extractdata(data, temp, len)) {
+                memset(temp, 0, len);
+                continue;
+            }
+
+            dns_receiver__on_chunk_received(&clientaddr.sin_addr, filepath, chunkID, strlen(query) - (strlen(query) / 63 + 1) );
+            dns_receiver__on_query_parsed(filepath, uselessquery(b));
+
+            memcpy(filedata+indbuffer, temp, strlen(temp));
+            indbuffer += strlen(temp);
+
+            chunkID++;
+            memset(query, 0, MAXLINE);
         }
     }
 }
